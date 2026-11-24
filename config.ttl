@@ -1,0 +1,100 @@
+@prefix fuseki:  <http://jena.apache.org/fuseki#> .
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix tdb2:    <http://jena.apache.org/2016/tdb#> .
+@prefix ja:      <http://jena.hpl.hp.com/2005/11/Assembler#> .
+
+# Primary "kg" service - read/write CRUD, used by the agent's KG client. Plain TDB2,
+# real default graph: entity/attribute/relationship/glossary/transformation writes
+# and reads both target it directly. Deliberately NOT tdb2:unionDefaultGraph - that
+# flag makes plain "no GRAPH" reads resolve to the union of NAMED graphs only,
+# which would make this dataset's own default-graph content (i.e. everything the KG
+# client writes) invisible to its own plain queries. Named-graph content (e.g. the
+# ontology seed's #ontology graph) is still reachable here via an explicit GRAPH
+# clause; union + reasoned access is on "kg-reasoned" below instead.
+<#service> rdf:type fuseki:Service ;
+    fuseki:name "kg" ;
+    fuseki:endpoint [ fuseki:operation fuseki:query  ; fuseki:name "sparql" ] ;
+    fuseki:endpoint [ fuseki:operation fuseki:query  ; fuseki:name "query"  ] ;
+    # "health" is a third query endpoint over this SAME dataset, existing purely so
+    # the container liveness probe can run a real read (ASK{}) on a path of its own,
+    # distinct from /kg/sparql, so probe traffic is separable in logs.
+    #
+    # It is AUTHENTICATED like every other endpoint (2026-09-29). shiro.ini used to
+    # mark /kg/health anon, on the false premise that a Container Apps probe cannot
+    # send an Authorization header; since Shiro whitelists by path and never sees
+    # the query string, that made this endpoint an unauthenticated arbitrary-SPARQL
+    # surface over the whole graph. The probe carries Basic auth instead.
+    #
+    # It must exercise a transaction: /$/ping never touches the
+    # dataset, so it stays 200 while "Maximum lock count exceeded" makes every
+    # actual query fail. Same dataset reference (no second tdb2:location), so there
+    # is no extra store, no extra lock and no duplicate TDB2 connection.
+    fuseki:endpoint [ fuseki:operation fuseki:query  ; fuseki:name "health" ] ;
+    fuseki:endpoint [ fuseki:operation fuseki:update ; fuseki:name "update" ] ;
+    fuseki:endpoint [ fuseki:operation fuseki:gsp-r  ; fuseki:name "get"    ] ;
+    fuseki:endpoint [ fuseki:operation fuseki:gsp-rw ; fuseki:name "data"   ] ;
+    fuseki:endpoint [ fuseki:operation fuseki:upload ; fuseki:name "upload" ] ;
+    fuseki:dataset <#tdbDataset> ;
+    .
+
+<#tdbDataset> rdf:type tdb2:DatasetTDB2 ;
+    tdb2:location "/fuseki/databases/kg" ;
+    .
+
+# Secondary "kg-reasoned" service (query-only) - GenericRuleReasoner over kg.rules,
+# materialising SWRL-style inference (transitive subClassOf/hasPart, feeds
+# closure, mapsUp) over the SAME union view. Query-only because binding a GenericRuleReasoner
+# InfModel to an explicit union graph makes Fuseki refuse writes against it
+# ("Can't update the union graph of a dataset") - kept on a separate endpoint so it
+# never gets in the way of the writable "kg" dataset above. Both services share the
+# same tdb2:location, so writes via "kg" are immediately visible for reasoning here.
+# R14: the archive - every generation graph, active or not. The served `kg`
+# dataset holds a copy of each ACTIVE generation only, so its union is the
+# admitted set; an activation copies a generation in from here. Written only
+# once GENERATION_MODEL_LIVE is True. Same Basic auth as /kg (entrypoint.sh's
+# `/** = authcBasic`). No sparql/health/get/upload aliases, and no reasoner.
+<#archiveService> rdf:type fuseki:Service ;
+    fuseki:name "kg-archive" ;
+    fuseki:endpoint [ fuseki:operation fuseki:query  ; fuseki:name "query"  ] ;
+    fuseki:endpoint [ fuseki:operation fuseki:update ; fuseki:name "update" ] ;
+    fuseki:endpoint [ fuseki:operation fuseki:gsp-rw ; fuseki:name "data"   ] ;
+    fuseki:dataset <#archiveDataset> ;
+    .
+
+<#archiveDataset> rdf:type tdb2:DatasetTDB2 ;
+    tdb2:location "/fuseki/databases/kg-archive" ;
+    .
+
+<#reasonedService> rdf:type fuseki:Service ;
+    fuseki:name "kg-reasoned" ;
+    fuseki:endpoint [ fuseki:operation fuseki:query ; fuseki:name "sparql" ] ;
+    fuseki:endpoint [ fuseki:operation fuseki:query ; fuseki:name "query"  ] ;
+    fuseki:dataset <#infDataset> ;
+    .
+
+<#infDataset> rdf:type ja:RDFDataset ;
+    ja:defaultGraph <#infModel> ;
+    .
+<#infModel> rdf:type ja:InfModel ;
+    ja:baseModel <#baseUnion> ;
+    ja:reasoner [
+        ja:reasonerURL <http://jena.hpl.hp.com/2003/GenericRuleReasoner> ;
+        ja:rulesFrom <file:///fuseki/config/kg.rules> ;
+    ] ;
+    .
+# Reason over the DEFAULT graph AND all named graphs. The named-graph union
+# (urn:x-arq:UnionGraph) alone excludes the real default graph - where the KG
+# client writes entities/relationships incl. runtime maps_to edges - so rules
+# that consume runtime writes (mapsUp) would never see their inputs. UnionModel
+# of both graphs feeds the reasoner everything the KG holds.
+<#baseUnion> rdf:type ja:UnionModel ;
+    ja:rootModel <#defaultModel> ;
+    ja:subModel  <#namedUnionGraph> ;
+    .
+<#defaultModel> rdf:type tdb2:GraphTDB ;
+    tdb2:dataset <#tdbDataset> ;
+    .
+<#namedUnionGraph> rdf:type tdb2:GraphTDB ;
+    tdb2:dataset <#tdbDataset> ;
+    tdb2:graphName <urn:x-arq:UnionGraph> ;
+    .

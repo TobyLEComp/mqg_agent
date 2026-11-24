@@ -1,0 +1,10 @@
+# Rehearsal-only override: a SEPARATE data volume, and NO cloudflared.
+# The base file pairs fuseki with a tunnel using the production TUNNEL_TOKEN,
+# which would publish the rehearsal store. Start this with -f both files and
+# name only the fuseki service.
+services:
+  fuseki:
+    volumes:
+      - ./config/config.ttl:/fuseki/config.ttl:ro
+      - ./config:/fuseki/config:ro
+      - ./data-rehearsal-2026-10-06:/fuseki/databases
